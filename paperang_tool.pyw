@@ -156,6 +156,25 @@ def pack_1bpp(img: Image.Image) -> bytes:
     return bytes(out)
 
 
+def pack_2bpp(img: Image.Image, levels: int = 4) -> bytes:
+    """灰度打包成 2bpp：每字节四个像素，高位在左。"""
+    px = img.load()
+    width, height = img.size
+    max_level = max(1, levels - 1)
+    out = bytearray()
+    for y in range(height):
+        for x in range(0, width, 4):
+            value = 0
+            for i in range(4):
+                if x + i < width:
+                    level = round((255 - px[x + i, y]) * max_level / 255)
+                else:
+                    level = 0
+                value |= (level & 0x3) << (6 - 2 * i)
+            out.append(value)
+    return bytes(out)
+
+
 def pack_4bpp(img: Image.Image, levels: int = 12) -> bytes:
     """灰度打包成 4bpp：每字节两个像素，高 nibble 为左侧像素。"""
     px = img.load()
@@ -258,15 +277,21 @@ class Printer:
     def print_image_gray(self, img: Image.Image, levels: int = 12) -> None:
         if self.model != MODEL_HD:
             raise RuntimeError("灰阶仅支持 P2 HD")
-        data = pack_4bpp(img, levels)
-        width_bytes = PRINT_WIDTH // 2
+        if levels <= 4:
+            data = pack_2bpp(img, levels)
+            width_bytes = PRINT_WIDTH // 4
+            precision = 2
+        else:
+            data = pack_4bpp(img, levels)
+            width_bytes = PRINT_WIDTH // 2
+            precision = 4
         self._raw_send(a5_frame(a5_content(5, HD_PRINT_START)))
         time.sleep(0.2)
         chunk = 4 * width_bytes
         total = (len(data) + chunk - 1) // chunk
         for idx in range(total):
             part = data[idx * chunk:(idx + 1) * chunk]
-            body = (bytes([4])
+            body = (bytes([precision])
                     + struct.pack("<H", width_bytes)
                     + struct.pack("<H", 0)
                     + bytes([0])
@@ -443,7 +468,7 @@ class App(tk.Tk):
         self.image_mode_var = tk.StringVar(value="黑白抖动")
         self.image_mode_box = ttk.Combobox(
             img_frame, textvariable=self.image_mode_var, width=12, state="readonly",
-            values=["黑白抖动", "灰阶 8 级", "灰阶 12 级", "灰阶 16 级"],
+            values=["黑白抖动", "灰阶 4 级", "灰阶 8 级", "灰阶 12 级", "灰阶 16 级"],
         )
         self.image_mode_box.grid(row=0, column=2, padx=6)
         ttk.Button(img_frame, text="打印", width=8,
@@ -611,7 +636,7 @@ class App(tk.Tk):
         choice = self.image_mode_var.get()
         if self.printer.model == MODEL_HD and choice.startswith("灰阶"):
             mode = "gray"
-            levels = {"灰阶 8 级": 8, "灰阶 12 级": 12, "灰阶 16 级": 16}.get(choice, 12)
+            levels = {"灰阶 4 级": 4, "灰阶 8 级": 8, "灰阶 12 级": 12, "灰阶 16 级": 16}.get(choice, 12)
             label = choice
         else:
             mode = "bw"
