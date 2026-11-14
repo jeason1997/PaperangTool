@@ -443,7 +443,7 @@ class App(tk.Tk):
         self.image_mode_var = tk.StringVar(value="黑白抖动")
         self.image_mode_box = ttk.Combobox(
             img_frame, textvariable=self.image_mode_var, width=12, state="readonly",
-            values=["黑白抖动", "灰阶 12 级"],
+            values=["黑白抖动", "灰阶 8 级", "灰阶 12 级", "灰阶 16 级"],
         )
         self.image_mode_box.grid(row=0, column=2, padx=6)
         ttk.Button(img_frame, text="打印", width=8,
@@ -451,31 +451,13 @@ class App(tk.Tk):
 
         dens = ttk.LabelFrame(self, text="打印浓度")
         dens.pack(fill="x", padx=10, pady=4)
-        self.p2_dens = ttk.Frame(dens)
-        self.p2_dens.pack(fill="x")
-        self.p2_density_var = tk.DoubleVar(value=75)
-        self.p2_density_scale = ttk.Scale(
-            self.p2_dens, from_=0, to=100, orient="horizontal",
-            variable=self.p2_density_var, length=300, command=self._on_p2_density_move,
-        )
-        self.p2_density_scale.pack(side="left", padx=8)
-        self.p2_density_label = ttk.Label(self.p2_dens, text="75 / 100", width=9)
-        self.p2_density_label.pack(side="left")
-        ttk.Button(self.p2_dens, text="应用", width=6,
-                   command=self.apply_p2_density).pack(side="left", padx=6)
-        self.p2_density_scale.bind("<ButtonRelease-1>", lambda _e: self.apply_p2_density())
-        for value in (55, 75, 95):
-            ttk.Button(self.p2_dens, text=str(value), width=5,
-                       command=lambda v=value: self.set_p2_density(v)).pack(side="left", padx=2)
-
-        self.hd_dens = ttk.Frame(dens)
-        self.hd_density_var = tk.IntVar(value=95)
+        self.density_var = tk.IntVar(value=95)
         for value, name in ((55, "淡"), (75, "中"), (95, "浓")):
-            ttk.Radiobutton(self.hd_dens, text=f"{name}（{value}）", value=value,
-                            variable=self.hd_density_var,
-                            command=self.apply_hd_density).pack(side="left", padx=12, pady=4)
-        self.hd_density_label = ttk.Label(self.hd_dens, text="当前：浓（95）", foreground="#555")
-        self.hd_density_label.pack(side="left", padx=14)
+            ttk.Radiobutton(dens, text=f"{name}（{value}）", value=value,
+                            variable=self.density_var,
+                            command=self.apply_density).pack(side="left", padx=12, pady=4)
+        self.density_label = ttk.Label(dens, text="当前：浓（95）", foreground="#555")
+        self.density_label.pack(side="left", padx=14)
 
         info = ttk.LabelFrame(self, text="设备信息")
         info.pack(fill="x", padx=10, pady=4)
@@ -496,13 +478,9 @@ class App(tk.Tk):
             self.btn_conn.config(text="连接")
             self.log("机型已切换，连接已断开。")
         if model == MODEL_P2:
-            self.hd_dens.pack_forget()
-            self.p2_dens.pack(fill="x")
             self.image_mode_var.set("黑白抖动")
             self.image_mode_box.config(state="disabled")
         else:
-            self.p2_dens.pack_forget()
-            self.hd_dens.pack(fill="x")
             self.image_mode_box.config(state="readonly")
         self.log(f"当前机型：{model}")
 
@@ -630,19 +608,25 @@ class App(tk.Tk):
                 f"图片 {width}×{height} 点，打印后约 {mm / 10:.1f} 厘米。\n确定继续吗？",
             ):
                 return
-        mode = "gray" if (self.printer.model == MODEL_HD and self.image_mode_var.get() == "灰阶 12 级") else "bw"
-        self.log(f"开始处理图片（{ '灰阶 12 级' if mode == 'gray' else '黑白抖动' }）")
-        threading.Thread(target=self._image_worker, args=(path, mode), daemon=True).start()
+        choice = self.image_mode_var.get()
+        if self.printer.model == MODEL_HD and choice.startswith("灰阶"):
+            mode = "gray"
+            levels = {"灰阶 8 级": 8, "灰阶 12 级": 12, "灰阶 16 级": 16}.get(choice, 12)
+            label = choice
+        else:
+            mode = "bw"
+            levels = 0
+            label = "黑白抖动"
+        self.log(f"开始处理图片（{label}）")
+        threading.Thread(target=self._image_worker, args=(path, mode, levels, label), daemon=True).start()
 
-    def _image_worker(self, path: str, mode: str) -> None:
+    def _image_worker(self, path: str, mode: str, levels: int, label: str) -> None:
         try:
             img = load_image(path)
             if mode == "gray":
-                self.printer.print_image_gray(img)
-                label = "灰阶 12 级"
+                self.printer.print_image_gray(img, levels)
             else:
                 self.printer.print_image_bw(img)
-                label = "黑白抖动"
         except Exception as exc:
             message = str(exc)
             self.after(0, lambda: self.log(f"打印图片失败：{message}"))
@@ -660,32 +644,15 @@ class App(tk.Tk):
             if n > 0:
                 self.do_feed(n)
 
-    def _on_p2_density_move(self, value) -> None:
-        self.p2_density_label.config(text=f"{int(float(value))} / 100")
-
-    def set_p2_density(self, value: int) -> None:
-        self.p2_density_var.set(value)
-        self._on_p2_density_move(value)
-        self.apply_p2_density()
-
-    def apply_p2_density(self) -> None:
-        value = int(round(float(self.p2_density_var.get())))
-        try:
-            self.printer.set_density(value)
-        except Exception as exc:
-            self.log(f"设置浓度失败：{exc}")
-            return
-        self.log(f"浓度设为 {value}")
-
-    def apply_hd_density(self) -> None:
-        value = int(self.hd_density_var.get())
+    def apply_density(self) -> None:
+        value = int(self.density_var.get())
         name = {55: "淡", 75: "中", 95: "浓"}.get(value, str(value))
+        self.density_label.config(text=f"当前：{name}（{value}）")
         try:
             self.printer.set_density(value)
         except Exception as exc:
             self.log(f"设置浓度失败：{exc}")
             return
-        self.hd_density_label.config(text=f"当前：{name}（{value}）")
         self.log(f"浓度设为 {name}（{value}）")
 
     def refresh_info(self) -> None:
