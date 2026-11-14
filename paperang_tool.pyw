@@ -27,6 +27,7 @@ P2 HD::
 
 from __future__ import annotations
 
+import json
 import struct
 import threading
 import time
@@ -156,25 +157,6 @@ def pack_1bpp(img: Image.Image) -> bytes:
     return bytes(out)
 
 
-def pack_2bpp(img: Image.Image, levels: int = 4) -> bytes:
-    """灰度打包成 2bpp：每字节四个像素，高位在左。"""
-    px = img.load()
-    width, height = img.size
-    max_level = max(1, levels - 1)
-    out = bytearray()
-    for y in range(height):
-        for x in range(0, width, 4):
-            value = 0
-            for i in range(4):
-                if x + i < width:
-                    level = round((255 - px[x + i, y]) * max_level / 255)
-                else:
-                    level = 0
-                value |= (level & 0x3) << (6 - 2 * i)
-            out.append(value)
-    return bytes(out)
-
-
 def pack_4bpp(img: Image.Image, levels: int = 12) -> bytes:
     """灰度打包成 4bpp：每字节两个像素，高 nibble 为左侧像素。"""
     px = img.load()
@@ -277,14 +259,9 @@ class Printer:
     def print_image_gray(self, img: Image.Image, levels: int = 12) -> None:
         if self.model != MODEL_HD:
             raise RuntimeError("灰阶仅支持 P2 HD")
-        if levels <= 4:
-            data = pack_2bpp(img, levels)
-            width_bytes = PRINT_WIDTH // 4
-            precision = 2
-        else:
-            data = pack_4bpp(img, levels)
-            width_bytes = PRINT_WIDTH // 2
-            precision = 4
+        data = pack_4bpp(img, levels)
+        width_bytes = PRINT_WIDTH // 2
+        precision = 4
         self._raw_send(a5_frame(a5_content(5, HD_PRINT_START)))
         time.sleep(0.2)
         chunk = 4 * width_bytes
@@ -355,12 +332,12 @@ class Printer:
                     break
             return " | ".join(parts) if parts else "无响应"
 
-        parts = []
-        for child, name in ((HD_GET_DPI, "DPI"), (HD_GET_HOTSPOT, "加热点数"),
+        values = {}
+        for child, name in ((HD_GET_DPI, "DPI"), (HD_GET_HOTSPOT, "加热点"),
                             (HD_GET_DENSITY, "浓度"), (HD_GET_TEMP, "温度"), (HD_GET_SPEED, "速度")):
             parsed = parse_a5(self._raw_query(a5_frame(a5_content(5, child))))
             if not parsed:
-                parts.append(f"{name}=?")
+                values[name] = "?"
                 continue
             data = parsed[3]
             if len(data) >= 3:
@@ -369,19 +346,45 @@ class Printer:
             else:
                 value = b""
             if len(value) == 2:
-                num = struct.unpack("<H", value)[0]
+                values[name] = struct.unpack("<H", value)[0]
             elif len(value) == 1:
-                num = value[0]
+                values[name] = value[0]
             else:
-                num = int.from_bytes(value, "little") if value else "?"
-            parts.append(f"{name}={num}")
+                values[name] = int.from_bytes(value, "little") if value else "?"
+
+        temp = values.get("温度")
+        if isinstance(temp, int):
+            temp_text = f"{temp / 10:.1f}℃" if temp > 100 else f"{temp}℃"
+        else:
+            temp_text = "?"
+
+        extra = ""
         parsed = parse_a5(self._raw_query(a5_frame(a5_content(5, HD_GET_INFO)), wait=1.0))
         if parsed and len(parsed[3]) >= 3:
             length = struct.unpack("<H", parsed[3][1:3])[0]
             text = parsed[3][3:3 + length].decode("utf-8", "ignore").strip("\x00")
-            if text:
-                parts.append("INFO=" + text)
-        return " | ".join(parts) if parts else "无响应"
+            try:
+                tp = json.loads(text).get("TPInfo", {})
+                size = tp.get("TPSupportSize")
+                color = tp.get("TPColorSupport")
+                gray = color[5] if isinstance(color, list) and len(color) > 5 else None
+                if size is not None:
+                    extra = f"纸宽={size}mm"
+                if gray is not None:
+                    extra += f" 灰阶={gray}级"
+            except Exception:
+                extra = ""
+
+        parts = [
+            f"DPI={values.get('DPI', '?')}",
+            f"加热点={values.get('加热点', '?')}",
+            f"浓度={values.get('浓度', '?')}",
+            f"温度={temp_text}",
+            f"速度={values.get('速度', '?')}",
+        ]
+        if extra:
+            parts.append(extra)
+        return " | ".join(parts)
 
 
 # ───────────────────────────── GUI ─────────────────────────────
@@ -468,7 +471,7 @@ class App(tk.Tk):
         self.image_mode_var = tk.StringVar(value="黑白抖动")
         self.image_mode_box = ttk.Combobox(
             img_frame, textvariable=self.image_mode_var, width=12, state="readonly",
-            values=["黑白抖动", "灰阶 4 级", "灰阶 8 级", "灰阶 12 级", "灰阶 16 级"],
+            values=["黑白抖动", "灰阶 8 级", "灰阶 12 级", "灰阶 16 级"],
         )
         self.image_mode_box.grid(row=0, column=2, padx=6)
         ttk.Button(img_frame, text="打印", width=8,
@@ -636,7 +639,7 @@ class App(tk.Tk):
         choice = self.image_mode_var.get()
         if self.printer.model == MODEL_HD and choice.startswith("灰阶"):
             mode = "gray"
-            levels = {"灰阶 4 级": 4, "灰阶 8 级": 8, "灰阶 12 级": 12, "灰阶 16 级": 16}.get(choice, 12)
+            levels = {"灰阶 8 级": 8, "灰阶 12 级": 12, "灰阶 16 级": 16}.get(choice, 12)
             label = choice
         else:
             mode = "bw"
