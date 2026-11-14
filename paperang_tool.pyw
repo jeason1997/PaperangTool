@@ -45,7 +45,7 @@ CRC_SEED = 0x35769521
 MODEL_P2 = "P2"
 MODEL_HD = "P2 HD"
 PRINT_WIDTH = 576
-MAX_IMAGE_ROWS = 3000
+WARN_IMAGE_ROWS = 3000
 
 # P2 命令
 P2_PRINT_BITMAP = 0x00
@@ -128,7 +128,7 @@ def parse_a5(raw: bytes):
 
 
 def load_image(path: str) -> Image.Image:
-    """读图并适配 576 点宽：超宽裁掉右侧，偏窄右侧补白；过高截断。"""
+    """读图并适配 576 点宽：超宽裁掉右侧，偏窄右侧补白。高度不限制。"""
     img = Image.open(path).convert("L")
     width, height = img.size
     if width > PRINT_WIDTH:
@@ -137,8 +137,6 @@ def load_image(path: str) -> Image.Image:
         canvas = Image.new("L", (PRINT_WIDTH, height), 255)
         canvas.paste(img, (0, 0))
         img = canvas
-    if img.height > MAX_IMAGE_ROWS:
-        img = img.crop((0, 0, PRINT_WIDTH, MAX_IMAGE_ROWS))
     return img
 
 
@@ -285,11 +283,12 @@ class Printer:
             raise ValueError("1bpp 数据长度必须是 72 的倍数")
         if self.model == MODEL_P2:
             chunk = 14 * 72                     # 14 × 72 = 1008 ≤ 1023
-            total = (len(data) + chunk - 1) // chunk
-            for idx in range(total):
-                part = data[idx * chunk:(idx + 1) * chunk]
-                self._raw_send(p2_frame(P2_PRINT_BITMAP, part, total - idx - 1))
-                time.sleep(0.02)
+            packets = [data[i:i + chunk] for i in range(0, len(data), chunk)]
+            for start in range(0, len(packets), 255):
+                batch = packets[start:start + 255]
+                for idx, part in enumerate(batch):
+                    self._raw_send(p2_frame(P2_PRINT_BITMAP, part, len(batch) - idx - 1))
+                    time.sleep(0.02)
         else:
             self._raw_send(a5_frame(a5_content(5, HD_PRINT_START)))
             time.sleep(0.2)
@@ -303,7 +302,7 @@ class Printer:
                         + bytes([0])
                         + struct.pack("<H", len(part))
                         + part)
-                content = struct.pack("<H", idx + 1) + struct.pack("<H", len(body)) + body
+                content = struct.pack("<H", (idx % 65535) + 1) + struct.pack("<H", len(body)) + body
                 self._raw_send(a5_frame(a5_content(5, HD_PRINT_DATA, content)))
                 time.sleep(0.12)
             time.sleep(0.2)
@@ -618,6 +617,19 @@ class App(tk.Tk):
         if not self.printer.connected:
             messagebox.showwarning("未连接", "请先连接打印机。")
             return
+        try:
+            with Image.open(path) as probe:
+                width, height = probe.size
+        except Exception as exc:
+            messagebox.showerror("打不开图片", str(exc))
+            return
+        if height > WARN_IMAGE_ROWS:
+            mm = height * 25.4 / 300
+            if not messagebox.askyesno(
+                "图片较长",
+                f"图片 {width}×{height} 点，打印后约 {mm / 10:.1f} 厘米。\n确定继续吗？",
+            ):
+                return
         mode = "gray" if (self.printer.model == MODEL_HD and self.image_mode_var.get() == "灰阶 12 级") else "bw"
         self.log(f"开始处理图片（{ '灰阶 12 级' if mode == 'gray' else '黑白抖动' }）")
         threading.Thread(target=self._image_worker, args=(path, mode), daemon=True).start()
